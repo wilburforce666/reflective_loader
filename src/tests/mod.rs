@@ -93,7 +93,7 @@ mod integration_tests {
         
         let packed_data = fs::read(output_file.path()).unwrap();
         assert!(packed_data.len() > 8, "Packed file too small");
-        assert_eq!(&packed_data[0..8], b"GPUPACKED", "Missing magic bytes");
+        assert_eq!(&packed_data[0..9], b"GPUPACKED", "Missing magic bytes");
         
         if !cfg!(target_os = "windows") {
             println!("Skipping unpacking test on non-Windows platform");
