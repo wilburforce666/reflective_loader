@@ -7,8 +7,11 @@ use anyhow::{Result, Context};
 #[cfg(feature = "gpu-packing")]
 mod opencl;
 
+mod loader;
+
 #[cfg(feature = "gpu-packing")]
 pub use self::opencl::*;
+pub use self::loader::*;
 
 #[derive(thiserror::Error, Debug)]
 pub enum PackerError {

