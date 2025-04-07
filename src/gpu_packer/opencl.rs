@@ -94,12 +94,12 @@ pub fn list_gpu_devices() -> Result<Vec<String>, PackerError> {
 
 #[cfg(feature = "gpu-packing")]
 pub fn pack_file_gpu<P: AsRef<Path>, Q: AsRef<Path>>(
-    input_path: P,
-    output_path: Q,
+    input_path: &P,
+    output_path: &Q,
     config: &PackerConfig,
 ) -> Result<(), PackerError> {
     let mut file_data = Vec::new();
-    let mut file = fs::File::open(&input_path)
+    let mut file = fs::File::open(input_path)
         .with_context(|| format!("Failed to open input file: {:?}", input_path.as_ref()))
         .map_err(|e| PackerError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
     
@@ -223,7 +223,7 @@ pub fn pack_file_gpu<P: AsRef<Path>, Q: AsRef<Path>>(
         checksum,
     };
     
-    let mut output_file = fs::File::create(&output_path)
+    let mut output_file = fs::File::create(output_path)
         .with_context(|| format!("Failed to create output file: {:?}", output_path.as_ref()))
         .map_err(|e| PackerError::IoError(io::Error::new(io::ErrorKind::Other, e)))?;
     

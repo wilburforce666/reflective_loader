@@ -171,7 +171,7 @@ pub fn pack_file<P: AsRef<Path>, Q: AsRef<Path>>(
 ) -> Result<(), PackerError> {
     #[cfg(feature = "gpu-packing")]
     {
-        match opencl::pack_file_gpu(input_path, output_path, config) {
+        match opencl::pack_file_gpu(&input_path, &output_path, config) {
             Ok(_) => return Ok(()),
             Err(e) => {
                 log::warn!("GPU packing failed: {}, falling back to CPU", e);
