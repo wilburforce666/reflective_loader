@@ -58,8 +58,8 @@ pub struct EncryptedFileMetadata {
 
 #[derive(Debug)]
 pub struct ProtectedFile {
-    content: Vec<u8>,
-    metadata: Option<EncryptedFileMetadata>,
+    pub content: Vec<u8>,
+    pub metadata: Option<EncryptedFileMetadata>,
 }
 
 impl ProtectedFile {
