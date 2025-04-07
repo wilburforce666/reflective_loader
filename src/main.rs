@@ -95,8 +95,9 @@ fn main() -> Result<(), anyhow::Error> {
                         auto_resume: !args.no_auto_resume,
                     };
                     
-                    let pe_data = fs::read(&args.input)
-                        .with_context(|| format!("Failed to read file: {:?}", args.input))?;
+                    let input_path = args.input.clone();
+                    let pe_data = fs::read(&input_path)
+                        .with_context(|| format!("Failed to read file: {:?}", input_path))?;
                     
                     let process_id = runpe::inject_pe(&pe_data, &config)
                         .with_context(|| "RUNPE injection failed")?;
@@ -105,8 +106,9 @@ fn main() -> Result<(), anyhow::Error> {
                 } else {
                     info!("Using reflective loading");
                     
-                    let file_data = fs::read(&args.input)
-                        .with_context(|| format!("Failed to read file: {:?}", args.input))?;
+                    let input_path = args.input.clone();
+                    let file_data = fs::read(&input_path)
+                        .with_context(|| format!("Failed to read file: {:?}", input_path))?;
                     
                     if file_data.len() >= 8 && &file_data[0..8] == b"GPUPACKED" {
                         info!("Detected packed file, using GPU packer loader");
