@@ -34,8 +34,9 @@ fn main() -> Result<(), anyhow::Error> {
                 use_encryption: !args.no_encryption,
             };
             
+            let input_path = args.input.clone();
             gpu_packer::pack_file(args.input, args.output, &config)
-                .with_context(|| format!("Failed to pack file: {:?}", args.input))?;
+                .with_context(|| format!("Failed to pack file: {:?}", input_path))?;
             
             info!("File packed successfully");
         },
@@ -43,8 +44,9 @@ fn main() -> Result<(), anyhow::Error> {
         cli::Commands::Unpack(args) => {
             info!("Unpacking file: {:?} -> {:?}", args.input, args.output);
             
+            let input_path = args.input.clone();
             gpu_packer::unpack_file(args.input, args.output)
-                .with_context(|| format!("Failed to unpack file: {:?}", args.input))?;
+                .with_context(|| format!("Failed to unpack file: {:?}", input_path))?;
             
             info!("File unpacked successfully");
         },
