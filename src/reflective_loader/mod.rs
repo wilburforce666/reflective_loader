@@ -16,18 +16,35 @@ use cbc::cipher::{
 };
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::System::Diagnostics::Debug::{
-    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_HEADERS64, IMAGE_NT_SIGNATURE,
-    IMAGE_FILE_MACHINE_AMD64, IMAGE_OPTIONAL_HEADER64, IMAGE_SECTION_HEADER,
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_DOS_HEADER, IMAGE_DOS_SIGNATURE, IMAGE_NT_SIGNATURE,
     IMAGE_BASE_RELOCATION, IMAGE_IMPORT_DESCRIPTOR, IMAGE_IMPORT_BY_NAME,
-    IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_BASERELOC,
     IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_DIR64,
+};
+
+#[cfg(target_os = "windows")]
+const IMAGE_DIRECTORY_ENTRY_IMPORT: u32 = 1;
+#[cfg(target_os = "windows")]
+const IMAGE_DIRECTORY_ENTRY_BASERELOC: u32 = 5;
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_NT_HEADERS32, IMAGE_OPTIONAL_HEADER32, IMAGE_SECTION_HEADER,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::SystemInformation::{
+    IMAGE_FILE_MACHINE_I386,
 };
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Memory::{
     VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
     PAGE_READONLY, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
     IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
 };
 
@@ -178,17 +195,17 @@ pub fn load_pe_with_config(pe_data: &[u8], config: &LoaderConfig) -> Result<i32,
     }
 
     let nt_headers_offset = dos_header.e_lfanew as usize;
-    let nt_header_64 = unsafe {
-        &*(pe_data.as_ptr().add(nt_headers_offset) as *const IMAGE_NT_HEADERS64)
+    let nt_header_32 = unsafe {
+        &*(pe_data.as_ptr().add(nt_headers_offset) as *const IMAGE_NT_HEADERS32)
     };
-    if nt_header_64.Signature != IMAGE_NT_SIGNATURE {
+    if nt_header_32.Signature != IMAGE_NT_SIGNATURE {
         return Err(LoaderError::InvalidPeFormat("Invalid PE signature".into()));
     }
-    if nt_header_64.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 {
-        return Err(LoaderError::InvalidPeFormat("This loader only supports 64-bit AMD64 PEs".into()));
+    if nt_header_32.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 {
+        return Err(LoaderError::InvalidPeFormat("This loader only supports 32-bit x86 PEs".into()));
     }
 
-    let opt_header = &nt_header_64.OptionalHeader;
+    let opt_header = &nt_header_32.OptionalHeader;
     let image_size = opt_header.SizeOfImage as usize;
     let entry_rva  = opt_header.AddressOfEntryPoint as usize;
     let preferred_base = opt_header.ImageBase as usize;
@@ -209,11 +226,11 @@ pub fn load_pe_with_config(pe_data: &[u8], config: &LoaderConfig) -> Result<i32,
         );
     }
 
-    let num_sections = nt_header_64.FileHeader.NumberOfSections as usize;
+    let num_sections = nt_header_32.FileHeader.NumberOfSections as usize;
     let section_header_ptr = unsafe {
         pe_data.as_ptr()
             .add(nt_headers_offset)
-            .add(size_of::<IMAGE_NT_HEADERS64>())
+            .add(size_of::<IMAGE_NT_HEADERS32>())
     } as *const IMAGE_SECTION_HEADER;
 
     let sections = unsafe { slice::from_raw_parts(section_header_ptr, num_sections) };
@@ -256,7 +273,7 @@ pub fn load_pe_with_config(pe_data: &[u8], config: &LoaderConfig) -> Result<i32,
 }
 
 #[cfg(target_os = "windows")]
-fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> Result<(), String> {
+fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER32) -> Result<(), String> {
     let import_dir = opt_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
     let import_desc_ptr = (image_base + import_dir.VirtualAddress as usize) as *const IMAGE_IMPORT_DESCRIPTOR;
 
@@ -276,10 +293,10 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
                 return Err(format!("Failed to load library: {}", dll_name));
             }
 
-            let mut oft_ptr = (image_base + desc.OriginalFirstThunk as usize) as *const usize;
-            let mut ft_ptr  = (image_base + desc.FirstThunk as usize) as *mut usize;
+            let mut oft_ptr = (image_base + desc.Anonymous.OriginalFirstThunk as usize) as *const usize;
+            let mut ft_ptr  = (image_base + desc.Anonymous.Characteristics as usize) as *mut usize;
 
-            if desc.OriginalFirstThunk == 0 {
+            if desc.Anonymous.OriginalFirstThunk == 0 {
                 oft_ptr = ft_ptr as *const usize;
             }
 
@@ -292,7 +309,7 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
 
                 let func_addr: usize;
 
-                if (lookup_val & 0x8000000000000000) != 0 {
+                if (lookup_val & 0x80000000) != 0 {
                     let ordinal = (lookup_val & 0xFFFF) as u16;
                     let proc_opt = GetProcAddress(dll_handle, ordinal as *const u8);
                     if let Some(fn_ptr) = proc_opt {
@@ -326,7 +343,7 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
 fn apply_relocations(
     image_base: usize,
     preferred_base: usize,
-    opt_header: &IMAGE_OPTIONAL_HEADER64
+    opt_header: &IMAGE_OPTIONAL_HEADER32
 ) -> Result<(), String> {
     let base_reloc_dir = opt_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC as usize];
     let reloc_va  = base_reloc_dir.VirtualAddress as usize;
@@ -378,7 +395,7 @@ fn apply_relocations(
 fn set_section_permissions(
     image_base: usize,
     sections: &[IMAGE_SECTION_HEADER],
-    opt_header: &IMAGE_OPTIONAL_HEADER64,
+    opt_header: &IMAGE_OPTIONAL_HEADER32,
 ) -> Result<(), String> {
     unsafe {
         for sect in sections {
@@ -497,7 +514,7 @@ fn allocate_memory_with_padding(image_size: usize) -> Result<*mut std::ffi::c_vo
 
 #[cfg(target_os = "windows")]
 fn allocate_memory_reverse_order(image_size: usize) -> Result<*mut std::ffi::c_void, LoaderError> {
-    let hint_address = 0x7FFFFFFFFF0000 as *mut std::ffi::c_void;
+    let hint_address = 0x7FFF0000 as *mut std::ffi::c_void;
     
     let alloc_base = unsafe {
         VirtualAlloc(
@@ -571,10 +588,10 @@ fn map_sections_standard(
     for sect in sections {
         let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
         let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
 
         if raw_size > 0 {
-            let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+            let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
             unsafe {
                 copy_nonoverlapping(src_ptr, dest_ptr, raw_size);
             }
@@ -615,10 +632,10 @@ fn map_sections_random_order(
         let sect = &sections[idx];
         let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
         let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
 
         if raw_size > 0 {
-            let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+            let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
             unsafe {
                 copy_nonoverlapping(src_ptr, dest_ptr, raw_size);
             }
@@ -646,7 +663,7 @@ fn map_sections_fragmented(
     for sect in sections {
         let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
         let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
 
         if raw_size > 0 {
             let chunk_size = 1024; // 1KB chunks
@@ -692,10 +709,10 @@ fn map_sections_custom_protection(
     for sect in sections {
         let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
         let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
 
         if raw_size > 0 {
-            let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+            let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
             unsafe {
                 copy_nonoverlapping(src_ptr, dest_ptr, raw_size);
             }
@@ -755,10 +772,10 @@ fn map_sections_delayed_protection(
     for sect in sections {
         let dest_ptr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut u8;
         let raw_size = sect.SizeOfRawData as usize;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
 
         if raw_size > 0 {
-            let src_ptr = pe_data.as_ptr().add(sect.PointerToRawData as usize);
+            let src_ptr = unsafe { pe_data.as_ptr().add(sect.PointerToRawData as usize) };
             unsafe {
                 copy_nonoverlapping(src_ptr, dest_ptr, raw_size);
             }
@@ -779,7 +796,7 @@ fn map_sections_delayed_protection(
     
     for sect in sections {
         let virt_addr = (alloc_base as usize + sect.VirtualAddress as usize) as *mut std::ffi::c_void;
-        let virt_size = sect.Misc.VirtualSize as usize;
+        let virt_size = unsafe { sect.Misc.VirtualSize as usize };
         
         if virt_size > 0 {
             let characteristics = sect.Characteristics;

