@@ -11,6 +11,7 @@ aes = "0.8"
 cbc = "0.1"
 cipher = "0.4"
 windows-sys = { version = "0.48", features = [
+    "Win32_Foundation",
     "Win32_Security_Cryptography", 
     "Win32_System_Diagnostics_Debug", 
     "Win32_System_Memory", 

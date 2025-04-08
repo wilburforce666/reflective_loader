@@ -10,7 +10,7 @@ use ocl::{Buffer, Kernel};
 use super::{PackerConfig, PackerError, PackedFileMetadata, calculate_checksum};
 
 #[cfg(feature = "gpu-packing")]
-const PACKER_KERNEL: &str = r#"
+pub const PACKER_KERNEL: &str = r#"
 __kernel void pack_segment(
     __global const uchar* input,
     __global uchar* output,

@@ -1,6 +1,7 @@
 
 use std::mem::{size_of, transmute};
-use std::ptr;
+use std::ptr::{copy_nonoverlapping, null_mut, write_bytes};
+use std::slice;
 use anyhow::Result;
 
 #[cfg(target_os = "windows")]
@@ -101,7 +102,7 @@ impl Default for LoaderConfig {
 }
 
 #[cfg(target_os = "windows")]
-const DEFAULT_AES_KEY: [u8; 32] = *b"ThisIs32BytesOfAKeyForAES-256!!"; // 32 bytes
+const DEFAULT_AES_KEY: [u8; 32] = *b"ThisIs32BytesOfAKeyForAES-256!!!"; // 32 bytes
 #[cfg(target_os = "windows")]
 const DEFAULT_AES_IV:  [u8; 16] = *b"16BytesOfInitVec";                // 16 bytes
 
@@ -156,9 +157,12 @@ pub fn decrypt_aes256_cbc(
     }
     let cipher = Decryptor::<Aes256>::new_from_slices(key, iv)
         .map_err(|_| LoaderError::DecryptionError("new_from_slices failed (invalid key/iv?)".to_string()))?;
+    let mut buffer = vec![0u8; ciphertext.len()];
+    buffer.copy_from_slice(ciphertext);
     cipher
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
         .map_err(|e| LoaderError::DecryptionError(format!("AES-256-CBC decryption failed: {:?}", e)))
+        .map(|decrypted| decrypted.to_vec())
 }
 
 #[cfg(target_os = "windows")]

@@ -1,11 +1,12 @@
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use anyhow::{Result, Context};
 
 use super::PackerError;
 use crate::reflective_loader;
+use crate::reflective_loader::LoaderError;
 
 #[cfg(target_os = "windows")]
 pub fn load_packed_executable<P: AsRef<Path>>(
