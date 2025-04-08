@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Result, Context};
 
 #[cfg(feature = "gpu-packing")]
-use ocl::{ProQue, Buffer, Kernel, SpatialDims, core::DeviceInfo};
+use ocl::{Buffer, Kernel};
 
 use super::{PackerConfig, PackerError, PackedFileMetadata, calculate_checksum};
 
@@ -69,14 +69,14 @@ pub fn list_gpu_devices() -> Result<Vec<String>, PackerError> {
     
     let mut devices = Vec::new();
     
-    for (platform_idx, platform) in platforms.iter().enumerate() {
+    for (_platform_idx, platform) in platforms.iter().enumerate() {
         let platform_name = platform.name()
             .map_err(|e| PackerError::OpenClError(format!("Failed to get platform name: {}", e)))?;
         
         let platform_devices = ocl::Device::list(platform, Some(ocl::core::DeviceType::GPU))
             .map_err(|e| PackerError::OpenClError(format!("Failed to list devices: {}", e)))?;
         
-        for (device_idx, device) in platform_devices.iter().enumerate() {
+        for (_device_idx, device) in platform_devices.iter().enumerate() {
             let device_name = device.name()
                 .map_err(|e| PackerError::OpenClError(format!("Failed to get device name: {}", e)))?;
             
@@ -293,7 +293,7 @@ pub fn unpack_file_gpu<P: AsRef<Path>, Q: AsRef<Path>>(
     }
     let mut segment_count_bytes = [0u8; 4];
     segment_count_bytes.copy_from_slice(&packed_data[offset..offset+4]);
-    let segment_count = u32::from_le_bytes(segment_count_bytes);
+    let _segment_count = u32::from_le_bytes(segment_count_bytes);
     offset += 4;
     
     if packed_data.len() < offset + 4 {

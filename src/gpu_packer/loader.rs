@@ -1,11 +1,11 @@
 
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 use anyhow::{Result, Context};
 
-use super::{PackerError, PackerConfig};
-use crate::reflective_loader::{self, LoaderError};
+use super::PackerError;
+use crate::reflective_loader;
 
 #[cfg(target_os = "windows")]
 pub fn load_packed_executable<P: AsRef<Path>>(
@@ -145,7 +145,7 @@ fn unpack_with_gpu(
     key: &[u8; 32],
     device_index: usize,
 ) -> Result<Vec<u8>, PackerError> {
-    use ocl::{ProQue, Buffer, Kernel, SpatialDims};
+    use ocl::{Buffer, Kernel};
     
     let platforms = ocl::Platform::list();
     if platforms.is_empty() {

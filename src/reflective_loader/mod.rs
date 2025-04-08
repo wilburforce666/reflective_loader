@@ -1,9 +1,7 @@
 
-use std::io::Read;
 use std::mem::{size_of, transmute};
 use std::ptr::{copy_nonoverlapping, null_mut, write_bytes};
-use std::slice;
-use anyhow::{Result, Context};
+use anyhow::Result;
 
 #[cfg(target_os = "windows")]
 use aes::Aes256;
