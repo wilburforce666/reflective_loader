@@ -153,6 +153,9 @@ pub fn encrypt_file<P: AsRef<Path>, Q: AsRef<Path>>(
         .map_err(|_| FileLoadError::DecryptionError("Invalid key or IV".to_string()))?;
     
     let mut buffer = vec![0u8; file_data.len() + 32]; // Add extra space for padding
+    
+    buffer[..file_data.len()].copy_from_slice(&file_data);
+    
     let encrypted_data = cipher
         .encrypt_padded_mut::<Pkcs7>(&mut buffer, file_data.len())
         .map_err(|e| FileLoadError::DecryptionError(format!("Encryption failed: {:?}", e)))?;
