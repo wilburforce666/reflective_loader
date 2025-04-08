@@ -152,8 +152,9 @@ pub fn encrypt_file<P: AsRef<Path>, Q: AsRef<Path>>(
     let cipher = Encryptor::<Aes256>::new_from_slices(key, iv)
         .map_err(|_| FileLoadError::DecryptionError("Invalid key or IV".to_string()))?;
     
+    let mut buffer = vec![0u8; file_data.len() + 32]; // Add extra space for padding
     let encrypted_data = cipher
-        .encrypt_padded_vec_mut::<Pkcs7>(&file_data)
+        .encrypt_padded_mut::<Pkcs7>(&file_data, &mut buffer)
         .map_err(|e| FileLoadError::DecryptionError(format!("Encryption failed: {:?}", e)))?;
     
     fs::write(output_path, encrypted_data)?;

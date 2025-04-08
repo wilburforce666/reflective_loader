@@ -1,6 +1,6 @@
 
 use std::mem::{size_of, transmute};
-use std::ptr::{copy_nonoverlapping, null_mut, write_bytes};
+use std::ptr;
 use anyhow::Result;
 
 #[cfg(target_os = "windows")]
