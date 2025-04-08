@@ -175,14 +175,14 @@ pub fn pack_file<P: AsRef<Path>, Q: AsRef<Path>>(
             Ok(_) => return Ok(()),
             Err(e) => {
                 log::warn!("GPU packing failed: {}, falling back to CPU", e);
-                return pack_file_cpu(input_path, output_path, config);
+                return pack_file_cpu(&input_path, &output_path, config);
             }
         }
     }
     
     #[cfg(not(feature = "gpu-packing"))]
     {
-        pack_file_cpu(input_path, output_path, config)
+        pack_file_cpu(&input_path, &output_path, config)
     }
 }
 
@@ -218,7 +218,7 @@ pub fn unpack_file<P: AsRef<Path>, Q: AsRef<Path>>(
     }
     let mut segment_count_bytes = [0u8; 4];
     segment_count_bytes.copy_from_slice(&packed_data[offset..offset+4]);
-    let segment_count = u32::from_le_bytes(segment_count_bytes);
+    let _segment_count = u32::from_le_bytes(segment_count_bytes);
     offset += 4;
     
     if packed_data.len() < offset + 4 {
